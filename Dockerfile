@@ -3,6 +3,7 @@ FROM nginx:latest
 
 # Copie o arquivo HTML para o diretório de conteúdo padrão do Nginx
 COPY index.html /usr/share/nginx/html
+COPY favicon.ico /usr/share/nginx/html/
 
 # Exponha a porta 80, que é a porta padrão do Nginx
 EXPOSE 80
