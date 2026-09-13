@@ -8,13 +8,21 @@ tags:
   - name: Mensagens
   - name: Remetentes
   - name: Créditos
+  - name: Grupos de Envio
+  - name: Sub-Contas
 paths:
   /v1/messages:
     post:
       tags:
         - Mensagens
       summary: Enviar Mensagem
-      description: Permite enviar uma SMS para um ou mais números de telefone.
+      description: |
+        Permite enviar uma SMS para um ou mais números de telefone.
+
+        A autenticação pode ser feita com o token da conta principal ou com o
+        `auth_token` de uma sub-conta (ver secção **Sub-Contas**); nesse caso o
+        crédito é debitado da sub-conta (e da conta principal) e a mensagem
+        fica associada a ela.
       requestBody:
         content:
           application/json:
@@ -35,20 +43,50 @@ paths:
                   required: true
                 to:
                   type: string
-                  description: Lista de número(s) destinatário(s) da mensagem
+                  description: Lista de número(s) destinatário(s) da mensagem, separados por
+                    vírgula. Em alternativa, pode ser o ID de um Grupo de Envio
+                    (ver secção **Grupos de Envio**) já criado, para enviar a
+                    todos os números desse grupo.
                   required: true
                 schedule:
                   type: string
                   description: Data e hora para o envio da SMS, no formato yyyyMMddHHmmss, ideal
                     para agendar o envio de uma SMS, não é um parâmetro
-                    obrigatório.
+                    obrigatório. Tem de ser uma data/hora futura.
                   format: date-time
+                  required: false
+                ttl:
+                  type: integer
+                  description: |
+                    Tempo de vida da SMS em segundos, não é um parâmetro obrigatório.
+
+                    Se a SMS ainda estiver pendente (isto é, ainda não foi aceite
+                    pelo operador/SMSC) quando este prazo expirar, o envio é
+                    cancelado automaticamente, o estado passa a expirado
+                    (visível como `REFUSED` no `message_status`) e o crédito
+                    gasto é devolvido à conta (e à sub-conta, se aplicável).
+
+                    Depois de a SMS ser aceite pelo operador, o `ttl` deixa de
+                    ter efeito: se o relatório de entrega (DLR) demorar ou não
+                    houver notificação, a SMS não é dada como expirada por
+                    causa disto.
+
+                    Se a mensagem tiver `schedule`, a contagem do `ttl` começa
+                    a partir da data/hora agendada, não da data de criação do
+                    pedido.
+
+                    Tem de ser um número inteiro de segundos entre 60 (1
+                    minuto) e 604800 (7 dias); estes limites são configuráveis
+                    no servidor e podem variar.
+                  minimum: 60
+                  maximum: 604800
                   required: false
               example:
                 message: Mensagem de teste.
                 from: MINHALOJA
                 to: "921939411"
                 schedule: "20231015182000"
+                ttl: 3600
       parameters:
         - name: Authorization
           in: header
@@ -65,14 +103,24 @@ paths:
           example: application/json
       responses:
         "201":
-          description: Mensagem enviada com sucesso
+          description: Mensagem enviada/agendada com sucesso
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
         4XX:
-          description: Houve um problema no pedido. Haverá uma descrição clara da causa do
-            do erro.
+          description: |
+            Houve um problema no pedido. Haverá uma descrição clara da causa
+            do erro, por exemplo:
+            - `remetente inválido` / `remetente pendente de aprovação`
+            - `destinatário não pode estar vazio` / `destinatário {numero} tem o formato inválido`
+            - `sem créditos suficientes` / `subconta sem créditos suficientes`
+            - `data de agendamento não está no formato yyyyMMddHHmmss` / `data de agendamento está no passado`
+            - `ttl deve ser um número inteiro de segundos entre {min} e {max}`
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
     get:
       tags:
         - Mensagens
@@ -95,7 +143,9 @@ paths:
         "200":
           description: Pedido Realizado com sucesso
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageList"
   /v1/messages/{message_id}:
     delete:
       tags:
@@ -111,6 +161,7 @@ paths:
           example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
         - name: message_id
           in: path
+          required: true
           schema:
             type: string
             description: ID da mensagem
@@ -120,6 +171,12 @@ paths:
           description: Pedido Realizado com sucesso
           content:
             application/json: {}
+        "404":
+          description: Mensagem inexistente (ou não pertence à conta autenticada)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/messages/recipients:
     get:
       tags:
@@ -144,7 +201,20 @@ paths:
         "200":
           description: Pedido Realizado com sucesso
           content:
-            application/json: {}
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recipients:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        phone_number:
+                          type: string
+                          example: "921939455"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
   /v1/messages/date:
     get:
       tags:
@@ -183,7 +253,9 @@ paths:
         "200":
           description: Pedido Realizado com sucesso
           content:
-            application/json: {}
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageList"
   /v1/messages/recipient:
     get:
       tags:
@@ -212,12 +284,45 @@ paths:
         "200":
           description: Pedido Realizado com sucesso
           content:
-            application/json: {}
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        message_id:
+                          type: string
+                          description: ID do registo do destinatário (receiver) desta SMS
+                        parent_id:
+                          type: string
+                          description: ID da mensagem
+                        content:
+                          type: string
+                        message_status:
+                          $ref: "#/components/schemas/MessageStatus"
+                        created_at:
+                          type: string
+                          format: date-time
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
   /v1/messages/one:
     get:
       tags:
         - Mensagens
-      summary: Mostrar mensagem pelo ID mensagem
+      summary: Mostrar mensagem ou destinatário por ID
+      description: |
+        Consulta um único registo. Consoante o parâmetro usado, devolve
+        coisas diferentes — **usar apenas um dos dois de cada vez**:
+        - `id` → devolve a mensagem completa (com todos os destinatários).
+        - `message_id` → devolve o estado de um único destinatário
+          (equivalente a um item de `recipients` dentro da mensagem).
+
+        Nota: apesar do nome, `message_id` aqui identifica o registo do
+        destinatário (receiver), não a mensagem — para a mensagem completa
+        deve usar-se o parâmetro `id`.
       parameters:
         - name: Authorization
           in: header
@@ -225,15 +330,16 @@ paths:
             type: string
             description: Token de autorização disponível no Portal Ombala
           example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
-        - name: message_id
+        - name: id
           in: query
-          description: ID da Mensagem
+          description: ID da Mensagem. Devolve a mensagem completa.
           schema:
             type: string
           example: 545b6ca5-a481-4abe-b3b9-ce1e8a4b3629
-        - name: id
+        - name: message_id
           in: query
-          description: ID do número de destino da SMS no contexto de uma mensagem
+          description: ID do destinatário (receiver) de uma mensagem. Devolve apenas
+            esse destinatário.
           schema:
             type: string
           example: 545b6ca5-a481-4abe-b3b9-ce1e8a4b3629
@@ -241,7 +347,17 @@ paths:
         "200":
           description: Pedido Realizado com sucesso
           content:
-            application/json: {}
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/Message"
+                  - $ref: "#/components/schemas/Receiver"
+        "404":
+          description: Mensagem/destinatário inexistente
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/senders/:
     post:
       tags:
@@ -255,7 +371,11 @@ paths:
               properties:
                 name:
                   type: string
-                  description: Nome do remente da SMS
+                  description: Nome do remente da SMS. Máximo de 11 caracteres e apenas
+                    caracteres suportados pelo alfabeto GSM (não pode conter
+                    emojis ou outros caracteres que obriguem a codificação
+                    UTF-16).
+                  maxLength: 11
                   required: true
               example:
                 name: LOJAHEBER
@@ -278,6 +398,15 @@ paths:
           description: Pedido Realizado com sucesso
           content:
             application/json: {}
+        4XX:
+          description: |
+            Houve um problema no pedido, por exemplo:
+            - `remetente já cadastrado`
+            - `remetente não pode conter caracteres que não sejam GSM`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/senders:
     get:
       tags:
@@ -343,6 +472,7 @@ paths:
           example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
         - name: sender_id
           in: path
+          required: true
           schema:
             type: string
             description: ID do Remetente
@@ -356,6 +486,17 @@ paths:
       tags:
         - Créditos
       summary: Mostrar Saldo/Créditos de SMS
+      description: |
+        Mostra o saldo de créditos de SMS disponível. Este saldo é ajustado
+        automaticamente (crédito devolvido) sempre que uma SMS não chega a
+        ser faturável, nomeadamente:
+        - O relatório de entrega (DLR) devolvido pelo operador tem um estado
+          não faturável (por exemplo `UNDELIV`, `EXPIRED`, `REJECTD`,
+          `DELETED` ou `UNKNOWN`).
+        - A SMS expira por `ttl` antes de ser aceite pelo operador (ver
+          parâmetro `ttl` em **Enviar Mensagem**).
+
+        Contas `postpaid` não são afetadas por este saldo/reembolso.
       parameters:
         - name: Authorization
           in: header
@@ -367,7 +508,17 @@ paths:
         "200":
           description: Pedido Realizado com sucesso
           content:
-            application/json: {}
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available_sms:
+                    type: integer
+                    description: Créditos de SMS disponíveis
+                  postpaid:
+                    type: boolean
+                    description: Indica se a conta é pós-paga (não debita créditos nem é
+                      afetada por reembolsos automáticos)
   /v1/recharges:
     get:
       tags:
@@ -385,4 +536,627 @@ paths:
           description: Pedido Realizado com sucesso
           content:
             application/json: {}
-components: {}
+  /v1/sending_groups:
+    post:
+      tags:
+        - Grupos de Envio
+      summary: Criar Grupo de Envio
+      description: Cria um grupo de números para posteriormente serem usados como
+        destinatários (`to`) no envio de uma SMS, ou terem números
+        adicionados em massa (inclusive por upload de Excel).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: Nome do grupo de envio
+              example:
+                name: Clientes VIP
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: Content-Type
+          in: header
+          schema:
+            type: string
+            description: Formato do conteúdo do pedido, formato application/json,
+              obrigatório.
+          example: application/json
+      responses:
+        "201":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendingGroup"
+    get:
+      tags:
+        - Grupos de Envio
+      summary: Listar Grupos de Envio
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+      responses:
+        "200":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SendingGroup"
+  /v1/sending_groups/{sending_group_id}:
+    get:
+      tags:
+        - Grupos de Envio
+      summary: Listar Números de um Grupo de Envio
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: sending_group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID do Grupo de Envio
+        - name: page
+          in: query
+          schema:
+            type: integer
+            description: Os números serão retornados em diversas páginas, pode requisitar
+              uma página especifica por esse parâmentro, ele não é obrigatório.
+          example: "0"
+      responses:
+        "200":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  name:
+                    type: string
+                  members:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Number"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "404":
+          description: Grupo de envio inexistente
+          content:
+            application/json: {}
+    post:
+      tags:
+        - Grupos de Envio
+      summary: Adicionar Números a um Grupo de Envio
+      description: |
+        Adiciona números ao grupo. **Nota:** ao contrário dos outros
+        endpoints, o corpo do pedido não é um objeto — é diretamente um
+        array JSON com os registos a adicionar.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                required:
+                  - phone_number
+                properties:
+                  phone_number:
+                    type: string
+                    description: Número no formato 9XXXXXXXX
+                  name:
+                    type: string
+                    description: Nome associado ao número, usado para personalizar a
+                      mensagem através do marcador NOME_DO_DESTINATARIO no
+                      texto da SMS quando se envia para um grupo.
+            example:
+              - phone_number: "921939411"
+                name: João
+              - phone_number: "921939422"
+                name: Maria
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: Content-Type
+          in: header
+          schema:
+            type: string
+            description: Formato do conteúdo do pedido, formato application/json,
+              obrigatório.
+          example: application/json
+        - name: sending_group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID do Grupo de Envio
+      responses:
+        "201":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendingGroup"
+        4XX:
+          description: Número(s) com formato inválido
+          content:
+            application/json: {}
+    delete:
+      tags:
+        - Grupos de Envio
+      summary: Apagar Grupo de Envio
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: sending_group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID do Grupo de Envio
+      responses:
+        "204":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json: {}
+  /v1/sending_groups/{sending_group_id}/upload:
+    post:
+      tags:
+        - Grupos de Envio
+      summary: Adicionar Números a um Grupo de Envio via Excel
+      description: Faz upload de um ficheiro Excel com números para adicionar em
+        massa ao grupo. O processamento do ficheiro é assíncrono.
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - excel_file
+              properties:
+                excel_file:
+                  type: string
+                  format: binary
+                  description: Ficheiro Excel (.xlsx) com os números a adicionar
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: sending_group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID do Grupo de Envio
+      responses:
+        "200":
+          description: Ficheiro recebido, processamento a decorrer em segundo plano
+          content:
+            application/json: {}
+  /v1/sending_groups/{sending_group_id}/{number_id}:
+    delete:
+      tags:
+        - Grupos de Envio
+      summary: Remover um Número de um Grupo de Envio
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: sending_group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID do Grupo de Envio
+        - name: number_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID do Número
+      responses:
+        "204":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json: {}
+  /v1/sub_accounts:
+    post:
+      tags:
+        - Sub-Contas
+      summary: Criar Sub-Conta
+      description: |
+        Cria uma sub-conta com o seu próprio `auth_token`, que pode ser usado
+        para autenticar pedidos a **Enviar Mensagem** (`/v1/messages`). O
+        crédito da sub-conta é independente, mas debita também o crédito da
+        conta principal a que pertence.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  description: Nome da sub-conta
+                available_sms:
+                  type: integer
+                  description: Créditos de SMS a atribuir inicialmente à sub-conta, não é
+                    obrigatório.
+              example:
+                name: Loja Talatona
+                available_sms: 1000
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: Content-Type
+          in: header
+          schema:
+            type: string
+            description: Formato do conteúdo do pedido, formato application/json,
+              obrigatório.
+          example: application/json
+      responses:
+        "201":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubAccount"
+    get:
+      tags:
+        - Sub-Contas
+      summary: Listar Sub-Contas
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+      responses:
+        "200":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubAccount"
+  /v1/sub_accounts/{sub_account_id}:
+    put:
+      tags:
+        - Sub-Contas
+      summary: Definir Crédito da Sub-Conta
+      description: Define (substitui) o saldo de créditos da sub-conta para o valor
+        indicado.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - credit
+              properties:
+                credit:
+                  type: integer
+                  description: Novo saldo de créditos, deve ser maior ou igual a zero
+              example:
+                credit: 500
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: sub_account_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID da Sub-Conta
+      responses:
+        "200":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubAccount"
+        4XX:
+          description: "`Crédito inválido. Deve ser maior ou igual a zero.`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sub_accounts/{sub_account_id}/increase:
+    put:
+      tags:
+        - Sub-Contas
+      summary: Aumentar Crédito da Sub-Conta
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - credit
+              properties:
+                credit:
+                  type: integer
+                  description: Quantidade de créditos a adicionar, deve ser maior ou igual a
+                    zero
+              example:
+                credit: 100
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: sub_account_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID da Sub-Conta
+      responses:
+        "200":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubAccount"
+        4XX:
+          description: "`Crédito inválido. Deve ser maior ou igual a zero.`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/sub_accounts/{sub_account_id}/decrease:
+    put:
+      tags:
+        - Sub-Contas
+      summary: Diminuir Crédito da Sub-Conta
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - credit
+              properties:
+                credit:
+                  type: integer
+                  description: Quantidade de créditos a subtrair, deve ser maior ou igual a
+                    zero. Não tem efeito se o saldo atual for inferior ao
+                    valor indicado.
+              example:
+                credit: 100
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: sub_account_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID da Sub-Conta
+      responses:
+        "200":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubAccount"
+        4XX:
+          description: "`Crédito inválido. Deve ser maior ou igual a zero.`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  schemas:
+    Error:
+      type: object
+      properties:
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              message:
+                type: string
+                example: sem créditos suficientes
+    MessageStatus:
+      type: string
+      description: |
+        Estado do envio, do ponto de vista do destinatário:
+        - `PENDING`: ainda não foi enviada ao operador (inclui o período de
+          espera até um eventual `schedule` ou `ttl`).
+        - `SENT`: aceite pelo operador, a aguardar confirmação de entrega.
+        - `DELIVERED`: confirmação de entrega recebida.
+        - `REFUSED`: não foi entregue — inclui recusas/erros do operador e
+          também SMS que expiraram por `ttl` sem chegarem a ser enviadas.
+      enum:
+        - PENDING
+        - SENT
+        - DELIVERED
+        - REFUSED
+    Receiver:
+      type: object
+      properties:
+        message_id:
+          type: string
+          description: ID deste destinatário (receiver)
+        phone_number:
+          type: string
+        message_status:
+          $ref: "#/components/schemas/MessageStatus"
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+        content:
+          type: string
+        cost:
+          type: number
+          description: Custo total da SMS (todas as partes e destinatários)
+        schedule:
+          type: string
+          nullable: true
+          description: Data/hora de agendamento, no formato yyyyMMddHHmmss, quando
+            aplicável
+        size:
+          type: integer
+          description: Número de caracteres da mensagem
+        gsm:
+          type: boolean
+          description: Indica se a mensagem usa apenas caracteres do alfabeto GSM (false
+            quando é necessária codificação UTF-16, por exemplo com emojis)
+        parts:
+          type: integer
+          description: Número de partes/segmentos SMS em que a mensagem foi dividida
+        from:
+          type: string
+          description: Nome do remetente
+        created_at:
+          type: string
+          format: date-time
+        total_recipients:
+          oneOf:
+            - type: integer
+            - type: string
+          description: Número de destinatários, ou uma mensagem informativa enquanto a
+            lista de destinatários ainda está a ser construída em segundo
+            plano (envios em massa)
+        recipients_pending:
+          type: integer
+        recipients_delivered:
+          type: integer
+        recipients_refused:
+          type: integer
+        recipients:
+          oneOf:
+            - type: array
+              items:
+                $ref: "#/components/schemas/Receiver"
+            - type: string
+          description: Lista de destinatários, ou uma mensagem informativa enquanto a
+            lista ainda está a ser construída em segundo plano (envios em
+            massa)
+    Pagination:
+      type: object
+      properties:
+        total_itens:
+          type: integer
+        page:
+          type: integer
+        items_per_page:
+          type: integer
+        last_page:
+          type: integer
+    MessageList:
+      type: object
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
+    Number:
+      type: object
+      properties:
+        id:
+          type: string
+        phone_number:
+          type: string
+        name:
+          type: string
+    SendingGroup:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/Number"
+    SubAccount:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        available_sms:
+          type: integer
+        auth_token:
+          type: string
+          description: Token a usar como Authorization ao enviar SMS em nome desta
+            sub-conta
