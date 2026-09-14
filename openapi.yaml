@@ -66,11 +66,6 @@ paths:
                     (visível como `REFUSED` no `message_status`) e o crédito
                     gasto é devolvido à conta (e à sub-conta, se aplicável).
 
-                    Depois de a SMS ser aceite pelo operador, o `ttl` deixa de
-                    ter efeito: se o relatório de entrega (DLR) demorar ou não
-                    houver notificação, a SMS não é dada como expirada por
-                    causa disto.
-
                     Se a mensagem tiver `schedule`, a contagem do `ttl` começa
                     a partir da data/hora agendada, não da data de criação do
                     pedido.
