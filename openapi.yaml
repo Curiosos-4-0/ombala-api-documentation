@@ -17,7 +17,9 @@ tags:
 
       Fluxo: pedir o envio com **Enviar Código OTP**, receber o código que o
       utilizador introduz na sua aplicação e confirmá-lo com **Verificar
-      Código OTP**. O Ombala gera o código, guarda-o de forma segura (nunca
+      Código OTP**. Com várias aplicações ou fluxos para os mesmos números,
+      use o parâmetro `context` para que os códigos de um não cancelem os do
+      outro. O Ombala gera o código, guarda-o de forma segura (nunca
       o devolve pela API) e controla a validade, o número de tentativas e os
       reenvios.
 paths:
@@ -1034,11 +1036,19 @@ paths:
         OTP**.
 
         Regras:
-        - Pedir um novo código para o mesmo número cancela o código anterior
-          ainda pendente (fica `CANCELLED`).
-        - Há um intervalo mínimo entre envios para o mesmo número (30
-          segundos) e um máximo de envios por hora por número (5). Estes
-          limites são configuráveis no servidor e podem variar.
+        - Pedir um novo código para o mesmo número **no mesmo `context`**
+          cancela o código anterior ainda pendente desse contexto (fica
+          `CANCELLED`). Códigos pendentes de outros contextos não são
+          afectados.
+        - Use `context` quando tiver várias aplicações ou fluxos que podem
+          pedir códigos para o mesmo número ao mesmo tempo (por exemplo
+          `login` e `pagamento`, ou `app-android` e `site`), para que um não
+          invalide o código do outro. Sem `context`, todos os códigos sem
+          contexto partilham o mesmo "grupo".
+        - Por omissão não há limite de reenvios. O servidor pode ser
+          configurado com um intervalo mínimo entre envios e/ou um máximo de
+          envios por hora para o mesmo número e contexto; nesse caso, acima
+          do limite a resposta é `429`.
         - A SMS tem um `ttl` igual à validade do código: se não for aceite
           pelo operador antes de o código expirar, não chega a ser enviada e
           o crédito é devolvido.
@@ -1061,6 +1071,17 @@ paths:
                 from:
                   type: string
                   description: Remetente da SMS, deve estar previamente criado e aprovado.
+                context:
+                  type: string
+                  description: |
+                    Contexto (aplicação ou fluxo) a que o código pertence, por
+                    exemplo `login`, `pagamento` ou `app-android`. Livre, até
+                    100 caracteres, não é obrigatório.
+
+                    Um novo código só cancela os códigos pendentes do mesmo
+                    número **e do mesmo contexto**. Na verificação por
+                    `phone_number` tem de indicar o mesmo `context`.
+                  maxLength: 100
                 message:
                   type: string
                   description: |
@@ -1099,6 +1120,7 @@ paths:
               example:
                 to: "921939411"
                 from: MINHALOJA
+                context: login
                 message: "MINHALOJA: o seu código é CODIGO_OTP. Não o partilhe."
                 length: 6
                 expires_in: 300
@@ -1129,7 +1151,9 @@ paths:
                 $ref: "#/components/schemas/OtpVerification"
         "429":
           description: |
-            Limite de envios para este número atingido, por exemplo:
+            Só quando o servidor tem limites de reenvio configurados (por
+            omissão não tem). Limite de envios para este número e contexto
+            atingido, por exemplo:
             - `aguarde {n} segundo(s) antes de pedir um novo código para este número`
             - `limite de {n} códigos por hora para este número atingido; tente mais tarde`
           content:
@@ -1158,7 +1182,9 @@ paths:
       description: |
         Confirma o código introduzido pelo utilizador. Indique o `id`
         devolvido por **Enviar Código OTP** ou, em alternativa, o
-        `phone_number` (é usado o código pendente mais recente desse número).
+        `phone_number` e o `context` usados no envio (é usado o código
+        pendente mais recente desse número nesse contexto; sem `context`,
+        só são considerados códigos enviados sem contexto).
 
         Um código só pode ser verificado com sucesso **uma vez**. Cada
         verificação (certa ou errada) conta como uma tentativa.
@@ -1180,11 +1206,18 @@ paths:
                   type: string
                   description: Número de telefone no formato 9XXXXXXXX. Usado quando não
                     se indica o `id`.
+                context:
+                  type: string
+                  description: Contexto indicado no envio. Com `phone_number`, escolhe o
+                    código desse contexto. Com `id`, se for indicado, tem de
+                    coincidir com o contexto do código (senão a resposta é
+                    `404`).
                 code:
                   type: string
                   description: Código introduzido pelo utilizador.
               example:
                 phone_number: "921939411"
+                context: login
                 code: "482913"
       parameters:
         - name: Authorization
@@ -1214,6 +1247,7 @@ paths:
                 verified: true
                 id: 0b6f3c1e-8d2a-4f5b-9c7e-1a2b3c4d5e6f
                 phone_number: "921939411"
+                context: login
                 status: VERIFIED
                 attempts_remaining: 0
                 expires_at: "2026-09-30T10:05:00.000Z"
@@ -1240,6 +1274,7 @@ paths:
                 verified: false
                 id: 0b6f3c1e-8d2a-4f5b-9c7e-1a2b3c4d5e6f
                 phone_number: "921939411"
+                context: login
                 status: PENDING
                 attempts_remaining: 4
                 expires_at: "2026-09-30T10:05:00.000Z"
@@ -1251,8 +1286,9 @@ paths:
                   - message: código inválido
         "404":
           description: |
-            - `código inexistente` (o `id` não existe ou não pertence à conta/sub-conta)
-            - `não existe nenhum código pendente para este número`
+            - `código inexistente` (o `id` não existe, não pertence à conta/sub-conta
+              ou não corresponde ao `context` indicado)
+            - `não existe nenhum código pendente para este número neste contexto`
           content:
             application/json:
               schema:
@@ -1452,7 +1488,8 @@ components:
         - `VERIFIED`: verificado com sucesso (não pode ser usado outra vez).
         - `EXPIRED`: a validade (`expires_in`) terminou sem verificação.
         - `BLOCKED`: esgotou as tentativas (`max_attempts`).
-        - `CANCELLED`: substituído por um novo código pedido para o mesmo número.
+        - `CANCELLED`: substituído por um novo código pedido para o mesmo número
+          e o mesmo `context`.
       enum:
         - PENDING
         - VERIFIED
@@ -1467,6 +1504,10 @@ components:
           description: ID do código OTP, a usar em Verificar/Consultar
         phone_number:
           type: string
+        context:
+          type: string
+          nullable: true
+          description: O `context` indicado no envio
         status:
           $ref: "#/components/schemas/OtpStatus"
         attempts_remaining:
