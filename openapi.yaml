@@ -10,6 +10,16 @@ tags:
   - name: Créditos
   - name: Grupos de Envio
   - name: Sub-Contas
+  - name: OTP
+    description: |
+      Envio e verificação de códigos de uso único (OTP) por SMS, para validar
+      números de telefone, logins ou transacções dos seus utilizadores.
+
+      Fluxo: pedir o envio com **Enviar Código OTP**, receber o código que o
+      utilizador introduz na sua aplicação e confirmá-lo com **Verificar
+      Código OTP**. O Ombala gera o código, guarda-o de forma segura (nunca
+      o devolve pela API) e controla a validade, o número de tentativas e os
+      reenvios.
 paths:
   /v1/messages:
     post:
@@ -804,7 +814,8 @@ paths:
       summary: Criar Sub-Conta
       description: |
         Cria uma sub-conta com o seu próprio `auth_token`, que pode ser usado
-        para autenticar pedidos a **Enviar Mensagem** (`/v1/messages`). O
+        para autenticar pedidos a **Enviar Mensagem** (`/v1/messages`) e aos
+        endpoints de **OTP** (`/v1/otp`). O
         crédito da sub-conta é independente, mas debita também o crédito da
         conta principal a que pertence.
       requestBody:
@@ -1008,6 +1019,284 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/otp:
+    post:
+      tags:
+        - OTP
+      summary: Enviar Código OTP
+      description: |
+        Gera um código numérico aleatório e envia-o por SMS para o número
+        indicado. A SMS é cobrada como qualquer outra (normalmente 1 crédito)
+        e aparece na listagem de mensagens.
+
+        O código **não é devolvido** na resposta: guarde o `id` (ou use o
+        número de telefone) para o verificar depois com **Verificar Código
+        OTP**.
+
+        Regras:
+        - Pedir um novo código para o mesmo número cancela o código anterior
+          ainda pendente (fica `CANCELLED`).
+        - Há um intervalo mínimo entre envios para o mesmo número (30
+          segundos) e um máximo de envios por hora por número (5). Estes
+          limites são configuráveis no servidor e podem variar.
+        - A SMS tem um `ttl` igual à validade do código: se não for aceite
+          pelo operador antes de o código expirar, não chega a ser enviada e
+          o crédito é devolvido.
+
+        Pode autenticar com o token da conta principal ou com o `auth_token`
+        de uma sub-conta; nesse caso o crédito é debitado da sub-conta (e da
+        conta principal) e só essa sub-conta vê e verifica o código.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - to
+                - from
+              properties:
+                to:
+                  type: string
+                  description: Número de telefone do destinatário, no formato 9XXXXXXXX.
+                from:
+                  type: string
+                  description: Remetente da SMS, deve estar previamente criado e aprovado.
+                message:
+                  type: string
+                  description: |
+                    Texto da SMS, não é obrigatório. Tem de conter o marcador
+                    `CODIGO_OTP`, que é substituído pelo código gerado.
+
+                    Por omissão: `O seu código de verificação é CODIGO_OTP.
+                    Válido por N minuto(s).`
+                length:
+                  type: integer
+                  description: Número de dígitos do código, não é obrigatório.
+                  minimum: 4
+                  maximum: 8
+                  default: 6
+                expires_in:
+                  type: integer
+                  description: Validade do código em segundos, não é obrigatório. Os
+                    limites são configuráveis no servidor e podem variar.
+                  minimum: 60
+                  maximum: 3600
+                  default: 300
+                max_attempts:
+                  type: integer
+                  description: Número máximo de tentativas de verificação. Esgotadas as
+                    tentativas, o código fica `BLOCKED` e é preciso pedir um
+                    novo. Não é obrigatório.
+                  minimum: 1
+                  maximum: 10
+                  default: 5
+                reference:
+                  type: string
+                  description: Identificador livre do seu lado (por exemplo o id do utilizador ou da
+                    transacção), devolvido nas respostas. Máximo 255
+                    caracteres, não é obrigatório.
+                  maxLength: 255
+              example:
+                to: "921939411"
+                from: MINHALOJA
+                message: "MINHALOJA: o seu código é CODIGO_OTP. Não o partilhe."
+                length: 6
+                expires_in: 300
+                max_attempts: 5
+                reference: user-1234
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala, ou
+              `auth_token` de uma sub-conta
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: Content-Type
+          in: header
+          schema:
+            type: string
+            description: Formato do conteúdo do pedido, formato application/json,
+              obrigatório.
+          example: application/json
+      responses:
+        "201":
+          description: Código gerado e SMS enviada/em envio
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OtpVerification"
+        "429":
+          description: |
+            Limite de envios para este número atingido, por exemplo:
+            - `aguarde {n} segundo(s) antes de pedir um novo código para este número`
+            - `limite de {n} códigos por hora para este número atingido; tente mais tarde`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        4XX:
+          description: |
+            Houve um problema no pedido, por exemplo:
+            - `remetente inválido` / `remetente pendente de aprovação`
+            - `número de telefone inválido, use o formato 9XXXXXXXX`
+            - `a mensagem tem de conter o marcador CODIGO_OTP`
+            - `length deve ser um número inteiro entre 4 e 8`
+            - `expires_in deve ser um número inteiro de segundos entre {min} e {max}`
+            - `max_attempts deve ser um número inteiro entre 1 e 10`
+            - `sem créditos suficientes` / `subconta sem créditos suficientes`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/otp/verify:
+    post:
+      tags:
+        - OTP
+      summary: Verificar Código OTP
+      description: |
+        Confirma o código introduzido pelo utilizador. Indique o `id`
+        devolvido por **Enviar Código OTP** ou, em alternativa, o
+        `phone_number` (é usado o código pendente mais recente desse número).
+
+        Um código só pode ser verificado com sucesso **uma vez**. Cada
+        verificação (certa ou errada) conta como uma tentativa.
+
+        Para decidir se o utilizador pode avançar, use o campo `verified`
+        (ou o código HTTP 200), nunca apenas a existência de resposta.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - code
+              properties:
+                id:
+                  type: string
+                  description: ID do código OTP. Obrigatório se não indicar `phone_number`.
+                phone_number:
+                  type: string
+                  description: Número de telefone no formato 9XXXXXXXX. Usado quando não
+                    se indica o `id`.
+                code:
+                  type: string
+                  description: Código introduzido pelo utilizador.
+              example:
+                phone_number: "921939411"
+                code: "482913"
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala, ou
+              `auth_token` de uma sub-conta
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: Content-Type
+          in: header
+          schema:
+            type: string
+            description: Formato do conteúdo do pedido, formato application/json,
+              obrigatório.
+          example: application/json
+      responses:
+        "200":
+          description: Código correcto. O código fica `VERIFIED` e não pode ser usado
+            outra vez.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OtpVerificationResult"
+              example:
+                verified: true
+                id: 0b6f3c1e-8d2a-4f5b-9c7e-1a2b3c4d5e6f
+                phone_number: "921939411"
+                status: VERIFIED
+                attempts_remaining: 0
+                expires_at: "2026-09-30T10:05:00.000Z"
+                verified_at: "2026-09-30T10:01:12.000Z"
+                reference: user-1234
+                message_id: 545b6ca5-a481-4abe-b3b9-ce1e8a4b3629
+                created_at: "2026-09-30T10:00:00.000Z"
+        "422":
+          description: |
+            Código não verificado. `status` e a mensagem de erro indicam a
+            causa:
+            - `código inválido` (`PENDING`, ainda com `attempts_remaining`)
+            - `número máximo de tentativas atingido; peça um novo código` (`BLOCKED`)
+            - `código expirado; peça um novo código` (`EXPIRED`)
+            - `código já utilizado` (`VERIFIED`)
+            - `código substituído por um pedido mais recente` (`CANCELLED`)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/OtpVerificationResult"
+                  - $ref: "#/components/schemas/Error"
+              example:
+                verified: false
+                id: 0b6f3c1e-8d2a-4f5b-9c7e-1a2b3c4d5e6f
+                phone_number: "921939411"
+                status: PENDING
+                attempts_remaining: 4
+                expires_at: "2026-09-30T10:05:00.000Z"
+                verified_at: null
+                reference: user-1234
+                message_id: 545b6ca5-a481-4abe-b3b9-ce1e8a4b3629
+                created_at: "2026-09-30T10:00:00.000Z"
+                errors:
+                  - message: código inválido
+        "404":
+          description: |
+            - `código inexistente` (o `id` não existe ou não pertence à conta/sub-conta)
+            - `não existe nenhum código pendente para este número`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "400":
+          description: "`código obrigatório` / `indique o id ou o phone_number`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/otp/{otp_id}:
+    get:
+      tags:
+        - OTP
+      summary: Consultar Código OTP
+      description: Consulta o estado de um código OTP (sem o próprio código).
+      parameters:
+        - name: Authorization
+          in: header
+          required: true
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala, ou
+              `auth_token` de uma sub-conta
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: otp_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: ID do código OTP
+      responses:
+        "200":
+          description: Pedido Realizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OtpVerification"
+        "404":
+          description: "`código inexistente`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   schemas:
     Error:
@@ -1155,3 +1444,57 @@ components:
           type: string
           description: Token a usar como Authorization ao enviar SMS em nome desta
             sub-conta
+    OtpStatus:
+      type: string
+      description: |
+        Estado do código OTP:
+        - `PENDING`: enviado, à espera de verificação.
+        - `VERIFIED`: verificado com sucesso (não pode ser usado outra vez).
+        - `EXPIRED`: a validade (`expires_in`) terminou sem verificação.
+        - `BLOCKED`: esgotou as tentativas (`max_attempts`).
+        - `CANCELLED`: substituído por um novo código pedido para o mesmo número.
+      enum:
+        - PENDING
+        - VERIFIED
+        - EXPIRED
+        - BLOCKED
+        - CANCELLED
+    OtpVerification:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID do código OTP, a usar em Verificar/Consultar
+        phone_number:
+          type: string
+        status:
+          $ref: "#/components/schemas/OtpStatus"
+        attempts_remaining:
+          type: integer
+          description: Tentativas de verificação que ainda restam (0 se o código já
+            não estiver `PENDING`)
+        expires_at:
+          type: string
+          format: date-time
+        verified_at:
+          type: string
+          format: date-time
+          nullable: true
+        reference:
+          type: string
+          nullable: true
+          description: O `reference` indicado no envio
+        message_id:
+          type: string
+          description: ID da mensagem (SMS) enviada com o código
+        created_at:
+          type: string
+          format: date-time
+    OtpVerificationResult:
+      allOf:
+        - type: object
+          properties:
+            verified:
+              type: boolean
+              description: true apenas quando o código foi aceite neste pedido
+        - $ref: "#/components/schemas/OtpVerification"
