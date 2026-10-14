@@ -10,15 +10,52 @@ tags:
   - name: Créditos
   - name: Grupos de Envio
     description: |
-      Grupos de números (com nome opcional) para envio em massa. Para enviar
-      a um grupo, indique o ID do grupo no parâmetro `to` de **Enviar
-      Mensagem**.
+      Grupos de números (com nome opcional) para envio em massa.
 
-      Pode personalizar a mensagem para cada membro colocando o marcador
-      `NOME_DO_DESTINATARIO` no texto: cada destinatário recebe a SMS com o
-      marcador substituído pelo seu nome no grupo. Por exemplo,
-      `Olá NOME_DO_DESTINATARIO, a sua encomenda está pronta.` chega ao João
-      como `Olá João, a sua encomenda está pronta.`
+      ## Enviar Mensagem para Grupo
+
+      Para enviar uma SMS a todos os números de um grupo, use o endpoint
+      **Enviar Mensagem** (`POST /v1/messages`) e indique no parâmetro `to`
+      o ID do Grupo de Envio, em vez de uma lista de números.
+
+      ### Personalizar a mensagem com o nome do destinatário
+
+      Pode personalizar a mensagem para cada membro do grupo colocando o
+      marcador `NOME_DO_DESTINATARIO` no texto. Para cada membro, o marcador
+      é substituído pelo nome associado ao seu número.
+
+      Passos:
+      1. Criar o grupo com **Criar Grupo de Envio**.
+      2. Adicionar os números com o respetivo nome, através de **Adicionar
+         Números a um Grupo de Envio** (campo `name`) ou de **Adicionar
+         Números a um Grupo de Envio via Excel** (coluna `nome`).
+      3. Enviar a mensagem com o ID do grupo em `to` e o marcador
+         `NOME_DO_DESTINATARIO` no texto.
+
+      Exemplo de pedido:
+
+      ```json
+      {
+        "message": "Olá NOME_DO_DESTINATARIO, a sua encomenda está pronta.",
+        "from": "MINHALOJA",
+        "to": "ID_DO_GRUPO"
+      }
+      ```
+
+      Resultado:
+      - O João recebe: `Olá João, a sua encomenda está pronta.`
+      - A Maria recebe: `Olá Maria, a sua encomenda está pronta.`
+
+      Notas:
+      - O marcador tem de estar escrito exatamente assim (em maiúsculas,
+        com underscores) e pode aparecer várias vezes no texto.
+      - Se um número do grupo não tiver nome, o marcador é substituído por
+        texto vazio (ex.: `Olá , a sua encomenda está pronta.`).
+      - A personalização só se aplica ao envio para grupos; numa lista de
+        números em `to`, o texto é enviado tal como está.
+      - O custo é calculado com o texto final de cada destinatário: um nome
+        longo ou com acentos pode fazer a SMS ocupar mais partes e, por
+        isso, consumir mais créditos.
   - name: Sub-Contas
   - name: OTP
     description: |
@@ -46,26 +83,6 @@ paths:
         crédito é debitado da sub-conta (e da conta principal) e a mensagem
         fica associada a ela.
 
-        **Mensagens personalizadas para grupos:** ao enviar para um Grupo de
-        Envio (ID do grupo em `to`), pode incluir o marcador
-        `NOME_DO_DESTINATARIO` no texto da mensagem. Para cada membro do
-        grupo, o marcador é substituído pelo nome associado ao seu número
-        (ver **Adicionar Números a um Grupo de Envio**). Exemplo:
-
-        - Texto enviado: `Olá NOME_DO_DESTINATARIO, a sua encomenda está pronta.`
-        - O João recebe: `Olá João, a sua encomenda está pronta.`
-        - A Maria recebe: `Olá Maria, a sua encomenda está pronta.`
-
-        Notas:
-        - O marcador tem de estar escrito exatamente assim (em maiúsculas,
-          com underscores) e pode aparecer várias vezes no texto.
-        - Se um número do grupo não tiver nome, o marcador é substituído por
-          texto vazio (ex.: `Olá , a sua encomenda está pronta.`).
-        - A personalização só se aplica ao envio para grupos; numa lista de
-          números em `to`, o texto é enviado tal como está.
-        - O custo é calculado com o texto final de cada destinatário: um nome
-          longo ou com acentos pode fazer a SMS ocupar mais partes e, por
-          isso, consumir mais créditos.
       requestBody:
         content:
           application/json:
@@ -78,9 +95,7 @@ paths:
               properties:
                 message:
                   type: string
-                  description: Texto da mensagem. Ao enviar para um Grupo de Envio,
-                    pode conter o marcador NOME_DO_DESTINATARIO, que é
-                    substituído pelo nome de cada membro do grupo.
+                  description: Texto da mensagem
                   required: true
                 from:
                   type: string
@@ -89,9 +104,9 @@ paths:
                 to:
                   type: string
                   description: Lista de número(s) destinatário(s) da mensagem, separados por
-                    vírgula. Em alternativa, pode ser o ID de um Grupo de Envio
-                    (ver secção **Grupos de Envio**) já criado, para enviar a
-                    todos os números desse grupo.
+                    vírgula. Em alternativa, pode ser o ID de um Grupo de Envio,
+                    para enviar a todos os números desse grupo (mais detalhes
+                    em [Enviar Mensagem para Grupo](#tag/Grupos-de-Envio/Enviar-Mensagem-para-Grupo)).
                   required: true
                 schedule:
                   type: string
@@ -127,19 +142,6 @@ paths:
                 to: "921939411"
                 schedule: "20231015182000"
                 ttl: 3600
-            examples:
-              numeros:
-                summary: Envio para um ou mais números
-                value:
-                  message: Mensagem de teste.
-                  from: MINHALOJA
-                  to: "921939411,921939422"
-              grupo_personalizado:
-                summary: Envio personalizado para um Grupo de Envio
-                value:
-                  message: Olá NOME_DO_DESTINATARIO, a sua encomenda está pronta.
-                  from: MINHALOJA
-                  to: "ID_DO_GRUPO"
       parameters:
         - name: Authorization
           in: header
