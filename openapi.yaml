@@ -9,6 +9,16 @@ tags:
   - name: Remetentes
   - name: Créditos
   - name: Grupos de Envio
+    description: |
+      Grupos de números (com nome opcional) para envio em massa. Para enviar
+      a um grupo, indique o ID do grupo no parâmetro `to` de **Enviar
+      Mensagem**.
+
+      Pode personalizar a mensagem para cada membro colocando o marcador
+      `NOME_DO_DESTINATARIO` no texto: cada destinatário recebe a SMS com o
+      marcador substituído pelo seu nome no grupo. Por exemplo,
+      `Olá NOME_DO_DESTINATARIO, a sua encomenda está pronta.` chega ao João
+      como `Olá João, a sua encomenda está pronta.`
   - name: Sub-Contas
   - name: OTP
     description: |
@@ -35,6 +45,27 @@ paths:
         `auth_token` de uma sub-conta (ver secção **Sub-Contas**); nesse caso o
         crédito é debitado da sub-conta (e da conta principal) e a mensagem
         fica associada a ela.
+
+        **Mensagens personalizadas para grupos:** ao enviar para um Grupo de
+        Envio (ID do grupo em `to`), pode incluir o marcador
+        `NOME_DO_DESTINATARIO` no texto da mensagem. Para cada membro do
+        grupo, o marcador é substituído pelo nome associado ao seu número
+        (ver **Adicionar Números a um Grupo de Envio**). Exemplo:
+
+        - Texto enviado: `Olá NOME_DO_DESTINATARIO, a sua encomenda está pronta.`
+        - O João recebe: `Olá João, a sua encomenda está pronta.`
+        - A Maria recebe: `Olá Maria, a sua encomenda está pronta.`
+
+        Notas:
+        - O marcador tem de estar escrito exatamente assim (em maiúsculas,
+          com underscores) e pode aparecer várias vezes no texto.
+        - Se um número do grupo não tiver nome, o marcador é substituído por
+          texto vazio (ex.: `Olá , a sua encomenda está pronta.`).
+        - A personalização só se aplica ao envio para grupos; numa lista de
+          números em `to`, o texto é enviado tal como está.
+        - O custo é calculado com o texto final de cada destinatário: um nome
+          longo ou com acentos pode fazer a SMS ocupar mais partes e, por
+          isso, consumir mais créditos.
       requestBody:
         content:
           application/json:
@@ -47,7 +78,9 @@ paths:
               properties:
                 message:
                   type: string
-                  description: Texto da mensagem
+                  description: Texto da mensagem. Ao enviar para um Grupo de Envio,
+                    pode conter o marcador NOME_DO_DESTINATARIO, que é
+                    substituído pelo nome de cada membro do grupo.
                   required: true
                 from:
                   type: string
@@ -94,6 +127,19 @@ paths:
                 to: "921939411"
                 schedule: "20231015182000"
                 ttl: 3600
+            examples:
+              numeros:
+                summary: Envio para um ou mais números
+                value:
+                  message: Mensagem de teste.
+                  from: MINHALOJA
+                  to: "921939411,921939422"
+              grupo_personalizado:
+                summary: Envio personalizado para um Grupo de Envio
+                value:
+                  message: Olá NOME_DO_DESTINATARIO, a sua encomenda está pronta.
+                  from: MINHALOJA
+                  to: "ID_DO_GRUPO"
       parameters:
         - name: Authorization
           in: header
@@ -746,8 +792,14 @@ paths:
       tags:
         - Grupos de Envio
       summary: Adicionar Números a um Grupo de Envio via Excel
-      description: Faz upload de um ficheiro Excel com números para adicionar em
+      description: |
+        Faz upload de um ficheiro Excel com números para adicionar em
         massa ao grupo. O processamento do ficheiro é assíncrono.
+
+        A primeira linha deve ter os cabeçalhos: uma coluna com os números
+        (`telefone`, `numero`, `phone` ou `contacto`) e, opcionalmente, uma
+        coluna com os nomes (`nome` ou `name`). Os nomes são usados para
+        personalizar mensagens com o marcador `NOME_DO_DESTINATARIO`.
       requestBody:
         content:
           multipart/form-data:
