@@ -206,7 +206,13 @@ paths:
       tags:
         - Mensagens
       summary: Delete
-      description: Apagar o registro de envio de uma SMS
+      description: |
+        Apagar o registro de envio de uma SMS (deixa de aparecer nas
+        listagens).
+
+        **Atenção:** apagar não cancela o envio. Para impedir o envio de uma
+        mensagem agendada e recuperar o crédito, use primeiro **Cancelar
+        Mensagem Agendada**.
       parameters:
         - name: Authorization
           in: header
@@ -226,6 +232,82 @@ paths:
           description: Pedido Realizado com sucesso
           content:
             application/json: {}
+        "404":
+          description: Mensagem inexistente (ou não pertence à conta autenticada)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/messages/{message_id}/cancel:
+    post:
+      tags:
+        - Mensagens
+      summary: Cancelar Mensagem Agendada
+      description: |
+        Cancela uma mensagem enviada com `schedule` definido. Os destinatários que
+        ainda não foram enviados ao operador passam ao estado `CANCELLED`,
+        não chegam a ser enviados e o crédito gasto com eles é devolvido à
+        conta (e à sub-conta, se aplicável). O momento do cancelamento fica
+        registado em `cancelled_at`.
+
+        Destinatários já enviados ao operador (por exemplo, se a hora do
+        agendamento já tiver chegado e o envio estiver a decorrer) não podem
+        ser cancelados e seguem o fluxo normal; são contados em
+        `already_sent`.
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: ID da mensagem
+          example: b9eb6ea6-5117-4848-a9ed-8cbffc74a991
+      responses:
+        "200":
+          description: Mensagem cancelada
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: ID da mensagem
+                  cancelled:
+                    type: integer
+                    description: Destinatários cancelados (não serão enviados)
+                  already_sent:
+                    type: integer
+                    description: Destinatários que já tinham sido enviados ao operador e
+                      não foram cancelados
+                  refunded_sms:
+                    type: integer
+                    description: Créditos de SMS devolvidos à conta
+                  cancelled_at:
+                    type: string
+                    format: date-time
+                    description: Momento do cancelamento
+              example:
+                id: b9eb6ea6-5117-4848-a9ed-8cbffc74a991
+                cancelled: 1840
+                already_sent: 0
+                refunded_sms: 1840
+                cancelled_at: "2026-10-17T10:15:00.000+01:00"
+        "400":
+          description: |
+            - `só é possível cancelar mensagens agendadas`
+            - `mensagem já cancelada`
+            - `não há destinatários por enviar nesta mensagem; nada a cancelar`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           description: Mensagem inexistente (ou não pertence à conta autenticada)
           content:
@@ -1410,11 +1492,14 @@ components:
         - `DELIVERED`: confirmação de entrega recebida.
         - `REFUSED`: não foi entregue — inclui recusas/erros do operador e
           também SMS que expiraram por `ttl` sem chegarem a ser enviadas.
+        - `CANCELLED`: cancelada antes de ser enviada (ver **Cancelar
+          Mensagem Agendada**); o crédito foi devolvido.
       enum:
         - PENDING
         - SENT
         - DELIVERED
         - REFUSED
+        - CANCELLED
     Receiver:
       type: object
       properties:
@@ -1469,6 +1554,15 @@ components:
           type: integer
         recipients_refused:
           type: integer
+        recipients_cancelled:
+          type: integer
+          description: Destinatários cancelados antes do envio
+        cancelled_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Momento em que a mensagem agendada foi cancelada, quando
+            aplicável
         recipients:
           oneOf:
             - type: array
