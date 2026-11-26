@@ -77,8 +77,7 @@ tags:
       ## Configurar o callback
 
       1. Defina o URL com **Definir Callback** (`PUT /v1/callback`). A resposta
-         inclui o `secret` usado para assinar as notificações: guarde-o em
-         segurança.
+         inclui o `secret` usado para assinar as notificações.
       2. Confirme a integração com **Testar Callback**.
       3. Envie as SMS normalmente. Em **Enviar Mensagem** também pode indicar um
          `callback_url`, que substitui o da conta apenas para essa mensagem.
