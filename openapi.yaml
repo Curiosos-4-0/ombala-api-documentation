@@ -85,8 +85,6 @@ tags:
 
       Requisitos do URL:
       - tem de usar `https`;
-      - tem de ser acessível publicamente (não são aceites endereços privados,
-        locais ou de rede interna);
       - máximo de 2048 caracteres.
 
       As mensagens enviadas com o token de uma sub-conta usam o callback da
@@ -150,14 +148,12 @@ tags:
 
       ## Responder à notificação
 
-      Responda com qualquer código `2xx` em menos de 5 segundos. Se precisar
-      de fazer trabalho demorado, guarde a notificação e processe-a depois.
-      Redirecionamentos (`3xx`) não são seguidos e contam como falha.
+      Responda com qualquer código `2xx` em menos de 5 segundos. Redirecionamentos (`3xx`) não são seguidos e contam como falha.
 
       ## Novas tentativas e histórico
 
       Se o seu servidor não responder `2xx` dentro do prazo, ou não estiver
-      acessível, o Ombala volta a tentar até 10 vezes, com intervalos cada vez
+      acessível, vamos voltar a tentar até 10 vezes, com intervalos cada vez
       maiores, durante cerca de 4 horas. Esgotadas as tentativas, a
       notificação fica no estado `FAILED` e pode ser reenviada com **Reenviar
       Entrega**.
@@ -1369,7 +1365,7 @@ paths:
         - Callbacks
       summary: Definir Callback
       description: |
-        Define ou altera o URL notificado sempre que o estado de uma SMS muda (ver
+        Define ou altera a URL notificada sempre que o estado de uma SMS muda (ver
         a secção **Callbacks**). Na primeira configuração é gerado o `secret`
         usado para assinar as notificações; alterar o URL mantém o mesmo
         `secret`.
@@ -1442,11 +1438,9 @@ paths:
     post:
       tags:
         - Callbacks
-      summary: Renovar Segredo do Callback
+      summary: Renovar Secret do Callback
       description: |
-        Gera um novo `secret` para assinar as notificações. O anterior deixa de
-        ser usado de imediato, por isso atualize-o no seu sistema logo a
-        seguir.
+        Gera um novo `secret` para assinar as notificações.
       parameters:
         - name: Authorization
           in: header
