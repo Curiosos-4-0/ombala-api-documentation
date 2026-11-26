@@ -69,6 +69,183 @@ tags:
       outro. O Ombala gera o código, guarda-o de forma segura (nunca
       o devolve pela API) e controla a validade, o número de tentativas e os
       reenvios.
+  - name: Callbacks
+    description: |
+      Receba no seu sistema uma notificação (webhook) sempre que o estado de
+      envio de uma SMS muda, em vez de consultar a API periodicamente.
+
+      ## Configurar o callback
+
+      1. Defina o URL com **Definir Callback** (`PUT /v1/callback`). A resposta
+         inclui o `secret` usado para assinar as notificações: guarde-o em
+         segurança.
+      2. Confirme a integração com **Testar Callback**.
+      3. Envie as SMS normalmente. Em **Enviar Mensagem** também pode indicar um
+         `callback_url`, que substitui o da conta apenas para essa mensagem.
+
+      Requisitos do URL:
+      - tem de usar `https`;
+      - tem de ser acessível publicamente (não são aceites endereços privados,
+        locais ou de rede interna);
+      - máximo de 2048 caracteres.
+
+      As mensagens enviadas com o token de uma sub-conta usam o callback da
+      conta principal; o evento indica o `sub_account_id`. Os endpoints de
+      configuração do callback só aceitam o token da conta principal.
+
+      ## Eventos de estado
+
+      Por cada mudança de estado de cada destinatário, o Ombala faz um `POST`
+      ao seu URL com um corpo JSON como este:
+
+      ```json
+      {
+        "event_id": "5f0c6a1e-3b7d-4a49-9c55-2b8e4f0d7a11",
+        "event": "message.status",
+        "message_id": "0b9a3c1e-8f6d-4c2a-9e7b-1d5f3a8c6e42",
+        "parent_id": "b9eb6ea6-5117-4848-a9ed-8cbffc74a991",
+        "phone_number": "923456789",
+        "status": "DELIVERED",
+        "error_code": "000",
+        "sub_account_id": null,
+        "occurred_at": "2026-11-26T10:15:00Z"
+      }
+      ```
+
+      | Campo | Descrição |
+      |---|---|
+      | `event_id` | ID único da notificação. Use-o para ignorar notificações repetidas. |
+      | `event` | `message.status` (ou `test`, no evento de teste) |
+      | `message_id` | ID do destinatário, o mesmo `message_id` devolvido em **Obter Mensagem** |
+      | `parent_id` | ID da mensagem, devolvido em **Enviar Mensagem** |
+      | `phone_number` | Número do destinatário |
+      | `status` | Novo estado (ver abaixo) |
+      | `error_code` | Código de erro do operador, quando existir |
+      | `sub_account_id` | Sub-conta que enviou a mensagem, ou `null` |
+      | `occurred_at` | Momento da mudança de estado (UTC, ISO 8601) |
+
+      Estados notificados:
+      - `SENT`: aceite pelo operador, a aguardar confirmação de entrega. Pode
+        ser desligado com `include_sent: false` em **Definir Callback**, para
+        receber apenas os estados finais.
+      - `DELIVERED`: entregue ao destinatário.
+      - `REFUSED`: não foi entregue. Inclui recusas ou erros do operador e SMS
+        que expiraram por `ttl`.
+      - `CANCELLED`: cancelada antes de ser enviada (ver **Cancelar Mensagem
+        Agendada**).
+
+      `PENDING` nunca é notificado, porque é o estado inicial de todas as SMS.
+
+      Regras a ter em conta na sua integração:
+      - Cada estado é notificado no máximo uma vez por destinatário, mas a
+        mesma notificação pode chegar mais do que uma vez (por exemplo, se o
+        seu servidor a processar mas responder fora do prazo). Use o `event_id`
+        para ignorar duplicados.
+      - A ordem de chegada não é garantida: uma notificação `SENT` que precisou
+        de novas tentativas pode chegar depois do `DELIVERED`. Nunca substitua
+        um estado final (`DELIVERED`, `REFUSED`, `CANCELLED`) por `SENT`.
+      - Excecionalmente, o operador pode corrigir um estado final (por exemplo,
+        `REFUSED` seguido de `DELIVERED`); nesse caso recebe as duas
+        notificações e o estado correto é o da mais recente (`occurred_at`).
+
+      ## Responder à notificação
+
+      Responda com qualquer código `2xx` em menos de 5 segundos. Se precisar
+      de fazer trabalho demorado, guarde a notificação e processe-a depois.
+      Redirecionamentos (`3xx`) não são seguidos e contam como falha.
+
+      ## Novas tentativas e histórico
+
+      Se o seu servidor não responder `2xx` dentro do prazo, ou não estiver
+      acessível, o Ombala volta a tentar até 10 vezes, com intervalos cada vez
+      maiores, durante cerca de 4 horas. Esgotadas as tentativas, a
+      notificação fica no estado `FAILED` e pode ser reenviada com **Reenviar
+      Entrega**.
+
+      Todas as notificações, com o número de tentativas e a última resposta do
+      seu servidor, podem ser consultadas em **Listar Entregas** durante 30
+      dias.
+
+      ## Verificar a assinatura
+
+      Cada pedido inclui estes cabeçalhos:
+
+      | Cabeçalho | Descrição |
+      |---|---|
+      | `X-Ombala-Event` | Tipo de evento (`message.status` ou `test`) |
+      | `X-Ombala-Delivery` | ID da notificação (igual ao `event_id`) |
+      | `X-Ombala-Timestamp` | Momento do envio, em segundos desde 1970 (Unix) |
+      | `X-Ombala-Signature` | `sha256=` seguido do HMAC-SHA256, em hexadecimal |
+
+      A assinatura é o HMAC-SHA256 do texto
+      `<X-Ombala-Timestamp>.<corpo do pedido>`, calculado com o seu `secret`.
+      Para confirmar que a notificação vem do Ombala:
+      1. calcule o HMAC sobre o corpo exatamente como foi recebido (antes de
+         o converter de JSON);
+      2. compare-o com `X-Ombala-Signature` com uma comparação de tempo
+         constante;
+      3. rejeite pedidos com `X-Ombala-Timestamp` com mais de 5 minutos, para
+         evitar a reutilização de pedidos antigos.
+
+      Node.js (Express):
+
+      ```javascript
+      const crypto = require('crypto');
+
+      app.post('/ombala/callback', express.raw({ type: 'application/json' }), (req, res) => {
+        const timestamp = req.get('X-Ombala-Timestamp');
+        const expected = 'sha256=' + crypto
+          .createHmac('sha256', process.env.OMBALA_CALLBACK_SECRET)
+          .update(`${timestamp}.${req.body}`)
+          .digest('hex');
+        const received = req.get('X-Ombala-Signature') || '';
+
+        const valid = received.length === expected.length &&
+          crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected)) &&
+          Math.abs(Date.now() / 1000 - Number(timestamp)) < 300;
+        if (!valid) return res.sendStatus(401);
+
+        const event = JSON.parse(req.body);
+        // guardar o evento e processá-lo depois
+        res.sendStatus(200);
+      });
+      ```
+
+      PHP:
+
+      ```php
+      $body = file_get_contents('php://input');
+      $timestamp = $_SERVER['HTTP_X_OMBALA_TIMESTAMP'] ?? '';
+      $received = $_SERVER['HTTP_X_OMBALA_SIGNATURE'] ?? '';
+      $expected = 'sha256=' . hash_hmac('sha256', $timestamp . '.' . $body, getenv('OMBALA_CALLBACK_SECRET'));
+
+      if (!hash_equals($expected, $received) || abs(time() - (int) $timestamp) > 300) {
+          http_response_code(401);
+          exit;
+      }
+
+      $event = json_decode($body, true);
+      http_response_code(200);
+      ```
+
+      Python (Flask):
+
+      ```python
+      import hashlib, hmac, os, time
+      from flask import request, abort
+
+      @app.post('/ombala/callback')
+      def ombala_callback():
+          timestamp = request.headers.get('X-Ombala-Timestamp', '')
+          body = request.get_data()
+          expected = 'sha256=' + hmac.new(os.environ['OMBALA_CALLBACK_SECRET'].encode(),
+                                          timestamp.encode() + b'.' + body, hashlib.sha256).hexdigest()
+          received = request.headers.get('X-Ombala-Signature', '')
+          if not hmac.compare_digest(expected, received) or abs(time.time() - int(timestamp or 0)) > 300:
+              abort(401)
+          event = request.get_json()
+          return '', 200
+      ```
 paths:
   /v1/messages:
     post:
@@ -135,6 +312,14 @@ paths:
                     no servidor e podem variar.
                   minimum: 60
                   maximum: 604800
+                  required: false
+                callback_url:
+                  type: string
+                  description: |
+                    URL notificado a cada mudança de estado dos destinatários desta
+                    mensagem, não é um parâmetro obrigatório. Substitui o callback
+                    da conta apenas para esta mensagem. Tem de usar `https` e ser
+                    acessível publicamente. Ver a secção **Callbacks**.
                   required: false
               example:
                 message: Mensagem de teste.
@@ -1157,6 +1342,285 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /v1/callback:
+    get:
+      tags:
+        - Callbacks
+      summary: Obter Callback
+      description: |
+        Devolve o callback configurado na conta. Se não houver nenhum, `url` e
+        `secret` vêm a `null`.
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização da conta principal, disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+      responses:
+        "200":
+          description: Callback da conta
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallbackConfig"
+    put:
+      tags:
+        - Callbacks
+      summary: Definir Callback
+      description: |
+        Define ou altera o URL notificado sempre que o estado de uma SMS muda (ver
+        a secção **Callbacks**). Na primeira configuração é gerado o `secret`
+        usado para assinar as notificações; alterar o URL mantém o mesmo
+        `secret`.
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização da conta principal, disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - url
+              properties:
+                url:
+                  type: string
+                  description: URL `https`, acessível publicamente, até 2048 caracteres.
+                include_sent:
+                  type: boolean
+                  description: |
+                    Se o estado `SENT` (aceite pelo operador) também é notificado.
+                    Com `false`, recebe apenas os estados finais. Se não for
+                    indicado, mantém o valor atual (por omissão `true`).
+            example:
+              url: https://www.minhaloja.ao/ombala/callback
+              include_sent: true
+      responses:
+        "200":
+          description: Callback definido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallbackConfig"
+        "400":
+          description: |
+            - `o URL de callback não pode estar vazio`
+            - `o URL de callback é inválido`
+            - `o URL de callback tem de usar https`
+            - `o URL de callback não pode conter credenciais`
+            - `não foi possível resolver o host do URL de callback`
+            - `o URL de callback tem de apontar para um endereço público`
+            - `o URL de callback não pode ter mais de 2048 caracteres`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+    delete:
+      tags:
+        - Callbacks
+      summary: Remover Callback
+      description: |
+        Desliga o callback da conta: deixam de ser enviadas notificações, exceto
+        para mensagens enviadas com o seu próprio `callback_url`. As
+        notificações já em curso continuam a ser entregues.
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização da conta principal, disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+      responses:
+        "204":
+          description: Callback removido
+  /v1/callback/secret/reset:
+    post:
+      tags:
+        - Callbacks
+      summary: Renovar Segredo do Callback
+      description: |
+        Gera um novo `secret` para assinar as notificações. O anterior deixa de
+        ser usado de imediato, por isso atualize-o no seu sistema logo a
+        seguir.
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização da conta principal, disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+      responses:
+        "200":
+          description: Novo segredo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret:
+                    type: string
+              example:
+                secret: whsec_6f1d0c9a8b7e6d5c4b3a29180f7e6d5c4b3a2918
+  /v1/callback/test:
+    post:
+      tags:
+        - Callbacks
+      summary: Testar Callback
+      description: |
+        Envia de imediato um evento `test` para o callback da conta e devolve o
+        resultado, para validar a integração (incluindo a verificação da
+        assinatura). Ao contrário dos eventos de estado, o teste não tem novas
+        tentativas: se falhar, fica `FAILED`.
+
+        Corpo enviado:
+
+        ```json
+        {
+          "event_id": "5f0c6a1e-3b7d-4a49-9c55-2b8e4f0d7a11",
+          "event": "test",
+          "message": "Evento de teste do Ombala",
+          "occurred_at": "2026-11-26T10:15:00Z"
+        }
+        ```
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização da conta principal, disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+      responses:
+        "200":
+          description: Resultado da tentativa (`DELIVERED` ou `FAILED`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallbackDelivery"
+        "400":
+          description: "`não há nenhum callback configurado`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/callback/deliveries:
+    get:
+      tags:
+        - Callbacks
+      summary: Listar Entregas
+      description: |
+        Histórico das notificações enviadas para o callback (dos últimos 30
+        dias), da mais recente para a mais antiga, 20 por página.
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização da conta principal, disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: page
+          in: query
+          schema:
+            type: integer
+            description: Página, a começar em 0
+          example: 0
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum:
+              - PENDING
+              - DELIVERED
+              - FAILED
+            description: Filtrar pelo estado da entrega
+        - name: message_id
+          in: query
+          schema:
+            type: string
+            description: Filtrar pelo ID do destinatário
+        - name: parent_id
+          in: query
+          schema:
+            type: string
+            description: Filtrar pelo ID da mensagem
+      responses:
+        "200":
+          description: Lista de entregas
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deliveries:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CallbackDelivery"
+                  pagination:
+                    type: object
+                    properties:
+                      total_itens:
+                        type: integer
+                      page:
+                        type: integer
+                      items_per_page:
+                        type: integer
+                      last_page:
+                        type: integer
+        "400":
+          description: |
+            - `message_id inválido`
+            - `parent_id inválido`
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /v1/callback/deliveries/{delivery_id}/retry:
+    post:
+      tags:
+        - Callbacks
+      summary: Reenviar Entrega
+      description: |
+        Volta a pôr na fila uma notificação `FAILED` (por exemplo, depois de o
+        seu servidor ter estado em baixo mais tempo do que as novas tentativas
+        automáticas). A notificação é reenviada com o mesmo `event_id` e
+        volta a ter novas tentativas automáticas.
+      parameters:
+        - name: Authorization
+          in: header
+          schema:
+            type: string
+            description: Token de autorização da conta principal, disponível no Portal Ombala
+          example: Token a9eb6ea6-5777-4848-a9ed-8cbffc74a503
+        - name: delivery_id
+          in: path
+          required: true
+          schema:
+            type: string
+            description: ID da entrega (o `id` devolvido em **Listar Entregas**)
+          example: 5f0c6a1e-3b7d-4a49-9c55-2b8e4f0d7a11
+      responses:
+        "200":
+          description: Entrega novamente na fila (`PENDING`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CallbackDelivery"
+        "400":
+          description: "`só é possível reenviar entregas falhadas`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Entrega inexistente (ou não pertence à conta autenticada)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /v1/otp:
     post:
       tags:
@@ -1494,6 +1958,9 @@ components:
           também SMS que expiraram por `ttl` sem chegarem a ser enviadas.
         - `CANCELLED`: cancelada antes de ser enviada (ver **Cancelar
           Mensagem Agendada**); o crédito foi devolvido.
+
+        Para ser notificado sempre que este estado muda, configure um
+        callback (ver secção **Callbacks**).
       enum:
         - PENDING
         - SENT
@@ -1687,3 +2154,111 @@ components:
               type: boolean
               description: true apenas quando o código foi aceite neste pedido
         - $ref: "#/components/schemas/OtpVerification"
+    CallbackConfig:
+      type: object
+      properties:
+        url:
+          type: string
+          nullable: true
+          description: URL do callback da conta, ou `null` se não estiver configurado
+        include_sent:
+          type: boolean
+          description: Se o estado `SENT` também é notificado
+        secret:
+          type: string
+          nullable: true
+          description: Segredo usado para assinar as notificações (ver **Verificar a
+            assinatura**)
+      example:
+        url: https://www.minhaloja.ao/ombala/callback
+        include_sent: true
+        secret: whsec_6f1d0c9a8b7e6d5c4b3a29180f7e6d5c4b3a2918
+    StatusCallbackEvent:
+      type: object
+      description: Corpo enviado ao callback em cada mudança de estado
+      properties:
+        event_id:
+          type: string
+          description: ID único da notificação, para ignorar repetições
+        event:
+          type: string
+          enum:
+            - message.status
+            - test
+        message_id:
+          type: string
+          description: ID do destinatário
+        parent_id:
+          type: string
+          description: ID da mensagem
+        phone_number:
+          type: string
+        status:
+          type: string
+          enum:
+            - SENT
+            - DELIVERED
+            - REFUSED
+            - CANCELLED
+        error_code:
+          type: string
+          nullable: true
+          description: Código de erro do operador, quando existir
+        sub_account_id:
+          type: string
+          nullable: true
+        occurred_at:
+          type: string
+          format: date-time
+    CallbackDelivery:
+      type: object
+      properties:
+        id:
+          type: string
+          description: ID da entrega (igual ao `event_id` enviado)
+        event:
+          type: string
+          enum:
+            - message.status
+            - test
+        url:
+          type: string
+          description: URL para onde a notificação foi enviada
+        status:
+          type: string
+          description: |
+            - `PENDING`: por entregar ou a aguardar uma nova tentativa
+            - `DELIVERED`: o seu servidor respondeu `2xx`
+            - `FAILED`: tentativas esgotadas (pode ser reenviada)
+          enum:
+            - PENDING
+            - DELIVERED
+            - FAILED
+        attempts:
+          type: integer
+          description: Número de tentativas feitas
+        response_code:
+          type: integer
+          nullable: true
+          description: Código HTTP da última resposta do seu servidor
+        response_body:
+          type: string
+          nullable: true
+          description: Início (até 1000 caracteres) da última resposta do seu servidor
+        error:
+          type: string
+          nullable: true
+          description: Motivo da última falha (ex. `resposta HTTP 500`, timeout)
+        payload:
+          $ref: "#/components/schemas/StatusCallbackEvent"
+        last_attempt_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
